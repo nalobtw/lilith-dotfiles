@@ -1,0 +1,8 @@
+# ======================================================================
+#  void-rust.txt — Rust toolchain, only used to build wallust when Void has no wallust package
+# ----------------------------------------------------------------------
+#  Installed by `lilith-rice wallust`.
+# ======================================================================
+
+rust
+cargo

@@ -1,0 +1,24 @@
+# ======================================================================
+#  void-files.txt — yazi, drive mounting and previews
+# ----------------------------------------------------------------------
+#  Installed by `lilith-rice files` (yazi's dependencies, in the order of the setup guide).
+#  Names are for Void x86_64-musl; check them with: lilith-rice packages
+# ======================================================================
+
+yazi
+udisks2
+udiskie
+polkit
+polkit-gnome
+rsync
+exfatprogs
+file
+ffmpeg
+poppler
+poppler-utils
+jq
+fd
+ripgrep
+fzf
+zoxide
+resvg

@@ -1,0 +1,12 @@
+# ======================================================================
+#  void-fonts.txt — fallback fonts from Void's own repository
+# ----------------------------------------------------------------------
+#  Installed by `lilith-rice fonts`. Gallant, JetBrains Mono, the emoji fonts and the Noto symbol/math/music
+#  fonts come from their upstream repositories (see cmd_fonts); these cover the rest of Unicode.
+#  Names are for Void x86_64-musl; check them with: lilith-rice packages
+# ======================================================================
+
+noto-fonts-ttf          # Noto Sans, Serif, Sans Mono
+noto-fonts-cjk          # Noto Sans CJK
+noto-fonts-emoji        # Noto Color Emoji
+unifont                 # GNU Unifont

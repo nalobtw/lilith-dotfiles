@@ -1,0 +1,10 @@
+# ======================================================================
+#  wallhaven.txt — the wallpaper (a wallhaven.cc ID)
+# ----------------------------------------------------------------------
+#  `lilith-rice wallpapers` downloads it to ~/Pictures/Wallpapers (no images in the repo) and
+#  saves it as The-Voyage-of-Life-Old-Age.png. Any other wallhaven-* file it once downloaded is
+#  removed; your own images in that folder are never touched.
+#  The Voyage of Life: Old Age (Thomas Cole, 1842) is the default (see theme/settings.conf).
+# ======================================================================
+
+g8kyj3

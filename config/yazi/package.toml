@@ -1,0 +1,7 @@
+# ======================================================================
+#  package.toml — yazi plugins (the lock file of `ya pkg`)
+# ----------------------------------------------------------------------
+#  Lives at ~/.config/yazi/package.toml (symlink to this file). `lilith-rice files` runs
+#  `ya pkg add` for every plugin in packages/yazi-plugins.txt and ya fills this file in
+#  with the exact revisions; commit it afterwards so the plugins stay pinned.
+# ======================================================================

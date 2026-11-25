@@ -1,0 +1,102 @@
+# ======================================================================
+#  zshrc — zsh: plugins in a fixed order, a calm prompt, pfetch on start
+# ----------------------------------------------------------------------
+#  Lives at ~/.zshrc (symlink to this file). Applies to new shells.
+#  Colours are the terminal's 16 ANSI colours, so they follow the wallust palette.
+#  Plugin order (do not reorder): 1 completions · 2 compinit · 3 autosuggestions · 4 autopair
+#  5 fzf · 6 zoxide · 7 atuin · 8 thefuck · 9 you-should-use · 10 fast-syntax-highlighting (last)
+#  Plugins from git live in ~/.local/share/zsh/plugins (lilith-rice shell).
+# ======================================================================
+
+PLUGINS=~/.local/share/zsh/plugins
+
+# --- options, history -------------------------------------------------------
+setopt autocd interactivecomments no_beep prompt_subst
+HISTFILE=~/.local/state/zsh/history
+HISTSIZE=50000
+SAVEHIST=50000
+mkdir -p "${HISTFILE:h}"
+setopt hist_ignore_dups hist_ignore_space hist_reduce_blanks share_history
+
+# --- keys ------------------------------------------------------------------
+bindkey -e
+bindkey '^[[H'    beginning-of-line
+bindkey '^[[F'    end-of-line
+bindkey '^[[3~'   delete-char
+bindkey '^[[1;5C' forward-word
+bindkey '^[[1;5D' backward-word
+
+# --- 1. zsh-completions: its directory goes on fpath BEFORE compinit ----------
+[ -d /usr/share/zsh-completions ] && fpath=(/usr/share/zsh-completions $fpath)
+
+# --- 2. compinit (once) ------------------------------------------------------
+mkdir -p ~/.cache/zsh
+autoload -Uz compinit && compinit -d ~/.cache/zsh/zcompdump
+zstyle ':completion:*' menu select
+zstyle ':completion:*' matcher-list 'm:{a-z}={A-Z}'
+zstyle ':completion:*' list-colors "${(s.:.)LS_COLORS}"
+
+# --- 3. zsh-autosuggestions: inline suggestions (Right arrow or End accepts) ---
+if [ -f /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh ]; then
+	source /usr/share/zsh-autosuggestions/zsh-autosuggestions.zsh
+	ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE='fg=8'
+fi
+
+# --- 4. zsh-autopair: closes brackets and quotes ------------------------------
+[ -f $PLUGINS/zsh-autopair/autopair.zsh ] && source $PLUGINS/zsh-autopair/autopair.zsh
+
+# --- 5. fzf: Ctrl+T files, Alt+C directories (Ctrl+R is taken over by atuin) ---
+export FZF_DEFAULT_OPTS='--color=16 --height=40% --layout=reverse --border=sharp --prompt="> " --pointer=">"'
+(( $+commands[fzf] )) && eval "$(fzf --zsh)"
+
+# --- 6. zoxide: `z dir` jumps to a directory you used before ------------------
+(( $+commands[zoxide] )) && eval "$(zoxide init zsh)"
+
+# --- 7. atuin: searchable history on Ctrl+R; Up-arrow stays normal zsh history -
+(( $+commands[atuin] )) && eval "$(atuin init zsh --disable-up-arrow)"
+
+# --- 8. thefuck: type `fuck` after a mistyped command (loaded on first use) ----
+if (( $+commands[thefuck] )); then
+	fuck() { eval "$(thefuck --alias)"; fuck "$@"; }
+fi
+
+# --- 9. zsh-you-should-use: reminds you of aliases you could have used ---------
+[ -f $PLUGINS/zsh-you-should-use/you-should-use.plugin.zsh ] && source $PLUGINS/zsh-you-should-use/you-should-use.plugin.zsh
+
+# --- prompt:  ~/path  branch  >      (exit code on the right when a command failed)
+autoload -Uz vcs_info add-zsh-hook
+zstyle ':vcs_info:*' enable git
+zstyle ':vcs_info:git:*' formats ' %F{8}%b%f'
+add-zsh-hook precmd vcs_info
+PROMPT='%F{4}%~%f${vcs_info_msg_0_} %(?.%F{2}.%F{1})>%f '
+RPROMPT='%(?..%F{1}%?%f)'
+
+# --- aliases ---------------------------------------------------------------
+alias ls='ls --color=auto -h --group-directories-first'
+alias ll='ls -l'
+alias la='ls -la'
+alias grep='grep --color=auto'
+alias ..='cd ..'
+alias ...='cd ../..'
+# vis: with no file name it opens on the fzf file picker (vis-fzf-open); with a name it opens that file
+vis() { if (( $# == 0 )); then command vis +fzf; else command vis "$@"; fi; }
+alias v=vis
+# notes live in ~/Notes
+notes() { mkdir -p ~/Notes && cd ~/Notes && vis "$@"; }
+# y: yazi that leaves you in the directory you quit in
+y() {
+	local tmp cwd
+	tmp="$(mktemp -t yazi-cwd.XXXXXX)"
+	yazi "$@" --cwd-file="$tmp"
+	if cwd="$(cat -- "$tmp")" && [ -n "$cwd" ] && [ "$cwd" != "$PWD" ]; then cd -- "$cwd"; fi
+	rm -f -- "$tmp"
+}
+
+# --- 10. fast-syntax-highlighting: LAST, after every other plugin ------------
+[ -f $PLUGINS/fast-syntax-highlighting/fast-syntax-highlighting.plugin.zsh ] && source $PLUGINS/fast-syntax-highlighting/fast-syntax-highlighting.plugin.zsh
+
+# --- greeting: pfetch when a terminal opens (not in nested shells) ------------
+if [[ -o interactive && ${SHLVL:-1} -le 1 ]] && (( $+commands[pfetch] )); then
+	PF_INFO="ascii title os host wm uptime pkgs memory palette" PF_ASCII=void \
+	PF_HOST="Lenovo ThinkPad X1 Carbon Gen 7" PF_WM=lilith pfetch
+fi
