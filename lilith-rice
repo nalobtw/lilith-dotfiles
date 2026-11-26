@@ -1,0 +1,1002 @@
+#!/bin/sh
+# ======================================================================
+#  lilith-rice — sets up the whole desktop on Void Linux with one command
+# ----------------------------------------------------------------------
+#  Run  ./lilith-rice help  for the command list.
+#  Every step is idempotent (safe to re-run). Files it replaces are
+#  backed up to ~/.config-backup/<timestamp>/ first.
+#
+#  Sections:  1 settings · 2 helpers · 3 packages · 4 services · 5 network
+#             6 wallpapers, fonts, wallust, Ly · 7 apps (lib/apps.sh) · 8 source + config + build
+#             9 verify · 10 install/update · 11 dispatch
+# ======================================================================
+set -u
+
+# ---------------------------------------------------------------- 1. settings
+SELF=$(readlink -f "$0")
+RICE_HOME=$(dirname "$SELF")
+CONF="${XDG_CONFIG_HOME:-$HOME/.config}"
+LILITH_SRC="${LILITH_SRC:-$HOME/.local/src/lilith}"
+LILITH_URL="https://github.com/ohto121/lilith"
+WALLPAPERS="$HOME/Pictures/Wallpapers"
+DEFAULT_WALLPAPER_ID="g8kyj3"   # The Voyage of Life: Old Age (Thomas Cole)
+WALLPAPER_FILE="The-Voyage-of-Life-Old-Age.png"
+TIMEZONE="Europe/Luxembourg"
+KEYMAP="uk"                      # console / Ly keymap (UK)
+LY_BG="$HOME/.local/share/lilith-rice/login.dur"
+FONT_DIR="$HOME/.local/share/fonts/lilith"
+# Downloads. JetBrains Mono is checked against a pinned SHA-256 (FreeBSD ports distinfo); Gallant comes
+# from a git tag (git verifies its own objects).
+GALLANT_REPO="https://github.com/NanoBillion/gallant"   # the font file is taken from git tag v0.1
+JETBRAINS_URL="https://github.com/JetBrains/JetBrainsMono/releases/download/v2.304/JetBrainsMono-2.304.zip"
+JETBRAINS_SHA="6f6376c6ed2960ea8a963cd7387ec9d76e3f629125bc33d1fdcd7eb7012f7bbf"
+NERD_URL="https://github.com/ryanoasis/nerd-fonts/releases/latest/download/NerdFontsSymbolsOnly.zip"
+BACKUP="$HOME/.config-backup/$(date +%Y%m%d-%H%M%S)"
+DRY="${DRY:-0}"          # DRY=1: print privileged commands instead of running them
+PROBLEMS=0
+# Tools installed by this script live in ~/.local/bin, which a fresh login shell may not have in PATH yet.
+PATH="$HOME/.local/bin:$PATH"
+export PATH
+# A stalled download must fail, not hang the install.
+export GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=30
+
+usage() {
+	cat <<TXT
+usage: lilith-rice <command>
+
+  install     deps, services, bluetooth, fonts, wallpapers, wallust, source, config, build, ly, select, files, shell,
+              browsers, flatpak, media, toys, dev, cursors, icons, verify
+  deps        update the system, install packages, Intel microcode
+  packages    check that every package name exists in the Void repos (installs nothing)
+  services    enable runit services (dbus, elogind, bluetoothd, tlp, thermald)
+  bluetooth   unblock the Bluetooth radio (bluez and its service come with deps/services)
+  files       yazi, drive mounting (udisks2, udiskie, polkit), previews and yazi plugins
+  shell       zsh plugins (zoxide, atuin, thefuck, autopair, you-should-use, fast-syntax-highlighting)
+  browsers    Librewolf (index-0 repository) and Firefox
+  flatpak     Flatpak, the Flathub remote and Bazaar
+  media       mpv, drift, pipemixer, ani-cli, MovieBox-Tui, rimg
+  toys        cowsay, pipes-rs, peaclock, lavat, unimatrix, csakura, genact, ascii-splash
+  dev         Vis, language servers, formatters, linters
+  select      build the crosshair area selector for screenshots and recording
+  cursors     every Catppuccin cursor theme
+  icons       Pixora (main) and Papirus (second) icon themes
+  wallust     install wallust (colours from the wallpaper) and its config
+  ly          install the Ly login manager with the current wallpaper as its background
+  fonts       Gallant Raster Term, JetBrains Mono, emoji fonts, Noto fallbacks, Unifont, Symbols Nerd Font (bar icons)
+  source      fetch or update the lilith compositor source
+  config      link dotfiles, install /etc files, wire audio, set zsh, copy lilith config
+  build       compile lilith and install it to ~/.local/bin
+  wallpapers  download The Voyage of Life: Old Age as ~/Pictures/Wallpapers/The-Voyage-of-Life-Old-Age.png
+  network     LAST STEP: switch Wi-Fi from wpa_supplicant/dhcpcd to NetworkManager
+  theme       re-apply settings and colours (bin/lilith-theme)
+  verify      check that everything is in place (exit 1 if not)
+  update      git pull this repo, then source + config + build + verify
+
+environment:  LILITH_SRC (default ~/.local/src/lilith)   DRY=1 (dry run)
+TXT
+}
+
+# ---------------------------------------------------------------- 2. helpers
+if [ -t 1 ]; then
+	B='\033[1m'; G='\033[32m'; Y='\033[33m'; R='\033[31m'; Z='\033[0m'
+else
+	B=''; G=''; Y=''; R=''; Z=''
+fi
+
+step() { printf "\n${B}==> %s${Z}\n" "$*"; }
+ok()   { printf "  ${G}ok${Z}    %s\n" "$*"; }
+warn() { printf "  ${Y}warn${Z}  %s\n" "$*"; }
+bad()  { printf "  ${R}FAIL${Z}  %s\n" "$*"; PROBLEMS=$((PROBLEMS + 1)); }
+die()  { printf "${R}lilith-rice: %s${Z}\n" "$*" >&2; exit 1; }
+
+# list_items <file>: the entries of a list file, without comments or blanks
+list_items() {
+	sed 's/#.*//; s/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d' "$1"
+}
+
+# run_root <cmd...>: run with sudo/doas (or print it when DRY=1)
+run_root() {
+	if [ "$DRY" = 1 ]; then
+		echo "  [dry] $*"
+	elif [ "$(id -u)" = 0 ]; then
+		"$@"
+	elif command -v sudo >/dev/null 2>&1; then
+		sudo "$@"
+	elif command -v doas >/dev/null 2>&1; then
+		doas "$@"
+	else
+		die "need root: install sudo or doas, or run as root"
+	fi
+}
+
+# expect <bad|warn> <label> <hint> <command...>: print ok, or the hint on failure
+expect() {
+	level=$1; label=$2; hint=$3; shift 3
+	if "$@" >/dev/null 2>&1; then
+		ok "$label"
+	elif [ "$level" = warn ]; then
+		warn "$label: $hint"
+	else
+		bad "$label: $hint"
+	fi
+}
+
+in_group()       { id -nG "$USER" | tr ' ' '\n' | grep -qx "$1"; }
+login_shell()    { getent passwd "$USER" | cut -d: -f7; }
+has_wallpapers() { [ -f "$WALLPAPERS/$WALLPAPER_FILE" ]; }
+
+if [ "$(id -u)" = 0 ] && [ "${ALLOW_ROOT:-0}" != 1 ]; then
+	die "run as your normal user (it uses sudo only where needed)"
+fi
+
+# soft <function> <hint>: a failure inside <function> only warns, it never fails the install
+soft() {
+	before=$PROBLEMS
+	"$1"
+	if [ "$PROBLEMS" -gt "$before" ]; then
+		PROBLEMS=$before
+		warn "$2"
+	fi
+}
+
+# fetch <url> <file>: download, following redirects; fails on HTTP errors.
+fetch() { curl -fsSL --connect-timeout 20 --max-time 900 -o "$2" "$1"; }
+
+# fetch_checked <url> <sha256> <file>: download and verify; a mismatching file is deleted.
+fetch_checked() {
+	fetch "$1" "$3" || return 1
+	[ "$(sha256sum "$3" | cut -d' ' -f1)" = "$2" ] || { rm -f "$3"; return 1; }
+}
+
+fc_has() { fc-list 2>/dev/null | grep -qiF "$1"; }
+
+# icon_installed <theme>: a folder with index.theme in the user or system icon directories
+icon_installed() { [ -n "$1" ] && { [ -f "$HOME/.local/share/icons/$1/index.theme" ] || [ -f "/usr/share/icons/$1/index.theme" ]; }; }
+
+# The application installers (xbps first, then source builds / Flatpak) live in lib/apps.sh.
+# shellcheck disable=SC1091
+. "$RICE_HOME/lib/apps.sh"
+
+# ---------------------------------------------------------------- 3. packages
+# install_packages <list file> <required|optional>
+install_packages() {
+	failed=""
+	for p in $(list_items "$1"); do
+		if xbps-query "$p" >/dev/null 2>&1; then
+			[ "$2" = required ] && ok "$p (already installed)"
+		elif run_root xbps-install -y "$p" >/dev/null 2>&1 || [ "$DRY" = 1 ]; then
+			ok "$p"
+		elif [ "$2" = required ]; then
+			bad "$p"
+			failed="$failed $p"
+		else
+			warn "optional package not installed: $p"
+		fi
+	done
+	if [ -n "$failed" ]; then
+		printf '\n  Missing required packages:%s\n' "$failed"
+		printf '  Find the right name:  xbps-query -Rs <word>\n'
+		printf '  Fix packages/void-required.txt, then run: lilith-rice deps\n'
+	fi
+}
+
+# Intel CPU microcode lives in the nonfree repo: optional, never fatal.
+# The nonfree repository (Intel microcode and some firmware live there).
+enable_nonfree() {
+	if xbps-query void-repo-nonfree >/dev/null 2>&1; then
+		ok "void-repo-nonfree (already enabled)"
+	elif run_root xbps-install -y void-repo-nonfree >/dev/null 2>&1 && run_root xbps-install -Sy >/dev/null 2>&1; then
+		ok "void-repo-nonfree enabled"
+	else
+		warn "could not enable void-repo-nonfree"
+	fi
+}
+
+install_ucode() {
+	if xbps-query intel-ucode >/dev/null 2>&1; then
+		ok "intel-ucode (already installed)"
+	elif run_root xbps-install -y intel-ucode >/dev/null 2>&1; then
+		ok "intel-ucode (rebuilding initramfs, this takes a minute)"
+		run_root xbps-reconfigure -fa >/dev/null 2>&1 || warn "initramfs rebuild reported a problem"
+	else
+		warn "intel-ucode not installed (optional)"
+	fi
+}
+
+cmd_deps() {
+	step "Packages (xbps)"
+	if [ "$DRY" != 1 ] && ! command -v xbps-install >/dev/null 2>&1; then
+		die "xbps-install not found: this is meant for Void Linux"
+	fi
+	# xbps itself must be current before anything else.
+	run_root xbps-install -Sy >/dev/null 2>&1 || run_root xbps-install -yu xbps \
+		|| die "could not sync the package repositories (network?)"
+	# Void does not support partial upgrades: bring the system current first.
+	run_root xbps-install -Syu || die "system update failed"
+	enable_nonfree
+	install_packages "$RICE_HOME/packages/void-required.txt" required
+	install_packages "$RICE_HOME/packages/void-optional.txt" optional
+	install_ucode
+}
+
+# Pre-flight: does every package name exist in the Void repositories?
+cmd_packages() {
+	step "Package names (checks the Void repos, installs nothing)"
+	if ! command -v xbps-query >/dev/null 2>&1; then
+		die "xbps-query not found: this is meant for Void Linux"
+	fi
+	run_root xbps-install -S >/dev/null 2>&1 || warn "could not sync the repositories; results may be stale"
+	for list in void-required void-select void-files void-shell void-apps void-media void-dev void-fonts void-icons void-ly void-optional; do
+		for p in $(list_items "$RICE_HOME/packages/$list.txt"); do
+			if xbps-query -R "$p" >/dev/null 2>&1; then
+				ok "$p"
+			elif [ "$list" = void-required ]; then
+				bad "$p (in $list.txt): not found, check with: xbps-query -Rs ${p%%-*}"
+			else
+				warn "$p (in $list.txt): not found"
+			fi
+		done
+	done
+}
+
+# ---------------------------------------------------------------- 4. services
+cmd_services() {
+	step "Services (runit)"
+	for s in $(list_items "$RICE_HOME/packages/services.txt"); do
+		if [ ! -d "/etc/sv/$s" ]; then
+			bad "service '$s' does not exist in /etc/sv (package missing?)"
+		elif [ -e "/var/service/$s" ]; then
+			ok "$s (already enabled)"
+		elif run_root ln -s "/etc/sv/$s" "/var/service/$s"; then
+			ok "$s enabled"
+		else
+			bad "could not enable $s"
+		fi
+	done
+}
+
+# ---------------------------------------------------------------- 5. network
+# Deliberately separate and last: it drops your Wi-Fi for a moment.
+cmd_network() {
+	step "Switch Wi-Fi to NetworkManager"
+	cat <<TXT
+  This disconnects you from Wi-Fi for a moment.
+  The wpa_supplicant and dhcpcd SERVICES are turned off (the packages stay:
+  NetworkManager uses wpa_supplicant as its Wi-Fi backend), then NetworkManager is turned on.
+  Afterwards run  nmtui  -> "Activate a connection" and enter your Wi-Fi password again.
+TXT
+	if [ "$DRY" != 1 ]; then
+		printf '  Continue? [y/N] '
+		read -r answer
+		case "$answer" in y|Y|yes) ;; *) echo "  cancelled."; return 0 ;; esac
+	fi
+	if [ ! -d /etc/sv/NetworkManager ]; then
+		bad "NetworkManager is not installed (run: lilith-rice deps)"
+		return
+	fi
+	for s in wpa_supplicant dhcpcd; do
+		if [ -e "/var/service/$s" ] && run_root rm -f "/var/service/$s"; then
+			ok "disabled $s"
+		fi
+	done
+	if [ -e /var/service/NetworkManager ]; then
+		ok "NetworkManager already enabled"
+	elif run_root ln -s /etc/sv/NetworkManager /var/service/NetworkManager; then
+		ok "NetworkManager enabled"
+	else
+		bad "could not enable NetworkManager"
+	fi
+	echo "  Now run:  nmtui"
+}
+
+# ---------------------------------------------------------------- 6. wallpapers
+# One wallpaper: The Voyage of Life: Old Age (wallhaven g8kyj3), saved as a PNG. Wallhaven serves
+# the original format, so a JPG is converted (ImageMagick is already needed for the login background).
+# Old wallhaven-* downloads are removed; images you added yourself are left alone.
+cmd_wallpapers() {
+	step "Wallpaper -> $WALLPAPERS/$WALLPAPER_FILE"
+	if ! command -v curl >/dev/null 2>&1; then
+		bad "curl not installed (sudo xbps-install curl)"
+		return
+	fi
+	mkdir -p "$WALLPAPERS"
+	for old in "$WALLPAPERS"/wallhaven-*; do
+		[ -e "$old" ] && rm -f "$old" && ok "removed old $(basename "$old")"
+	done
+	if [ -f "$WALLPAPERS/$WALLPAPER_FILE" ]; then
+		ok "$WALLPAPER_FILE (already there)"
+		return
+	fi
+	prefix=$(printf '%s' "$DEFAULT_WALLPAPER_ID" | cut -c1-2)
+	tmp=$(mktemp -d)
+	got=""
+	for ext in png jpg; do
+		if fetch "https://w.wallhaven.cc/full/$prefix/wallhaven-$DEFAULT_WALLPAPER_ID.$ext" "$tmp/wall.$ext"; then
+			got=$ext
+			break
+		fi
+	done
+	case "$got" in
+		png) mv "$tmp/wall.png" "$WALLPAPERS/$WALLPAPER_FILE" && ok "$WALLPAPER_FILE" ;;
+		jpg)
+			if have magick && magick "$tmp/wall.jpg" "$WALLPAPERS/$WALLPAPER_FILE" 2>/dev/null; then ok "$WALLPAPER_FILE (converted from JPG)"
+			elif have convert && convert "$tmp/wall.jpg" "$WALLPAPERS/$WALLPAPER_FILE" 2>/dev/null; then ok "$WALLPAPER_FILE (converted from JPG)"
+			else bad "wallpaper is a JPG and ImageMagick is missing (lilith-rice deps), so it could not be saved as PNG"; fi ;;
+		*) bad "could not download wallhaven $DEFAULT_WALLPAPER_ID" ;;
+	esac
+	rm -rf "$tmp"
+}
+
+# ---------------------------------------------------------------- 6b. fonts
+# Font files in your home ($FONT_DIR), no root needed, plus Void's noto/unifont packages for the
+# fallbacks. Main: Gallant Raster Term (git tag, checked by git) and JetBrains Mono (pinned SHA-256).
+# Emoji, symbol and math fonts are copied from their git repositories (font files are plain data,
+# so musl does not matter). Symbols Nerd Font stays because the bar icons need it.
+# font_from_git <label> <url> <file-name-pattern>...: shallow-clone, copy the matching font files.
+font_from_git() {
+	label=$1; url=$2; shift 2
+	if ls "$FONT_DIR"/".$label" >/dev/null 2>&1; then ok "$label (already installed)"; return 0; fi
+	work=$(mktemp -d)
+	if git clone -q --depth 1 "$url" "$work/repo" 2>"$work/err"; then
+		n=0
+		for pat in "$@"; do
+			find "$work/repo" -type f -name "$pat" 2>/dev/null | grep -vi 'variable\|/unhinted/\|/otf/' | head -n 4 > "$work/list"
+			while read -r f; do
+				install -Dm644 "$f" "$FONT_DIR/$(basename "$f")" && n=$((n + 1))
+			done < "$work/list"
+		done
+		if [ "$n" -gt 0 ]; then : > "$FONT_DIR/.$label"; ok "$label ($n file(s))"; rm -rf "$work"; return 0; fi
+	fi
+	warn "$label: no font file found in $url ($(tr '\n' ' ' < "$work/err" 2>/dev/null | cut -c1-80))"
+	rm -rf "$work"
+	return 1
+}
+
+cmd_fonts() {
+	step "Fonts ($FONT_DIR)"
+	for c in curl unzip tar fc-cache git; do
+		command -v "$c" >/dev/null 2>&1 || { bad "$c is not installed (run: lilith-rice deps)"; return; }
+	done
+	mkdir -p "$FONT_DIR"
+	# keep only what we install: remove fonts earlier versions of this script added
+	rm -f "$FONT_DIR"/SpaceGrotesk* "$FONT_DIR"/*Terminus* 2>/dev/null
+	tmp=$(mktemp -d)
+
+	if [ -f "$FONT_DIR/gallant.ttf" ]; then
+		ok "Gallant Raster Term (already installed)"
+	elif git clone -q --depth 1 --branch v0.1 "$GALLANT_REPO" "$tmp/gallant" 2>"$tmp/gallant.err" \
+	     && [ -f "$tmp/gallant/gallant.ttf" ] \
+	     && install -Dm644 "$tmp/gallant/gallant.ttf" "$FONT_DIR/gallant.ttf"; then
+		ok "Gallant (from git tag v0.1)"
+	else
+		bad "Gallant: could not fetch $GALLANT_REPO ($(tr '\n' ' ' < "$tmp/gallant.err" 2>/dev/null | cut -c1-120))"
+	fi
+
+	if ls "$FONT_DIR"/JetBrainsMono-*.ttf >/dev/null 2>&1; then
+		ok "JetBrains Mono (already installed)"
+	elif fetch_checked "$JETBRAINS_URL" "$JETBRAINS_SHA" "$tmp/jb.zip" && unzip -q -o "$tmp/jb.zip" -d "$tmp/jb"; then
+		for style in Regular Bold Italic BoldItalic; do
+			f=$(find "$tmp/jb" -name "JetBrainsMono-$style.ttf" | head -n1)
+			[ -n "$f" ] && install -Dm644 "$f" "$FONT_DIR/JetBrainsMono-$style.ttf"
+		done
+		ok "JetBrains Mono (checksum verified)"
+	else
+		bad "JetBrains Mono: download or checksum failed"
+	fi
+
+	if ls "$FONT_DIR"/SymbolsNerdFont-Regular.ttf >/dev/null 2>&1; then
+		ok "Symbols Nerd Font (already installed)"
+	elif fetch "$NERD_URL" "$tmp/nerd.zip" && unzip -q -o "$tmp/nerd.zip" -d "$tmp/nerd" \
+	     && f=$(find "$tmp/nerd" -name 'SymbolsNerdFont-Regular.ttf' | head -n1) && [ -n "$f" ]; then
+		install -Dm644 "$f" "$FONT_DIR/SymbolsNerdFont-Regular.ttf"
+		ok "Symbols Nerd Font (bar icons)"
+	else
+		warn "Symbols Nerd Font could not be downloaded: the bar icons will show as boxes"
+	fi
+	rm -rf "$tmp"
+
+	# emoji
+	font_from_git "SerenityOS Emoji" https://github.com/linusg/serenityos-emoji-font "*.ttf" || true
+	font_from_git "Mona Color Emoji" https://github.com/MonadABXY/mona-font "*.ttf" || true
+	# symbols, math, music (Void's noto-fonts-ttf-extra has them on some Void versions; the git copy is the fallback)
+	font_from_git "Noto Sans Symbols"   https://github.com/notofonts/symbols "NotoSansSymbols-Regular.ttf" "NotoSansSymbols2-Regular.ttf" || true
+	font_from_git "Noto Sans Math"      https://github.com/notofonts/math    "NotoSansMath-Regular.ttf" || true
+	font_from_git "Noto Music"          https://github.com/notofonts/music   "NotoMusic-Regular.ttf" || true
+	install_packages "$RICE_HOME/packages/void-fonts.txt" optional
+	fc-cache -f >/dev/null 2>&1
+	for fam in "Gallant" "JetBrains Mono" "Symbols Nerd Font" "Noto Sans" "Noto Serif" "Noto Sans Mono" "Noto Sans CJK" "Unifont" "Noto Color Emoji" "SerenityOS Emoji" "Mona"; do
+		expect warn "font $fam" "run 'lilith-rice fonts' (see: fc-list | grep -i '${fam%% *}')" fc_has "$fam"
+	done
+}
+
+# If the Gallant file calls itself something else than settings.conf's font, use its real name.
+reconcile_font() {
+	[ -f "$FONT_DIR/gallant.ttf" ] || return 0
+	want=$(sed -n 's/^font="\(.*\)"$/\1/p' "$CONF/lilith-rice/settings.conf" | head -n1)
+	[ "$want" = "Gallant Raster Term" ] || return 0
+	fc_has "$want" && return 0
+	have=$(fc-scan --format '%{family}\n' "$FONT_DIR/gallant.ttf" 2>/dev/null | head -n1 | sed 's/,.*//')
+	[ -n "$have" ] || return 0
+	sed -i "s|^font=.*|font=\"$have\"|" "$CONF/lilith-rice/settings.conf"
+	warn "the Gallant file calls itself '$have'; settings.conf now uses that name"
+}
+
+# ---------------------------------------------------------------- 6d. Bluetooth
+# The bluez package and the bluetoothd service come with deps / services. This script never
+# changes your groups; if bluetoothctl says it is not allowed, add yourself to `bluetooth` yourself.
+cmd_bluetooth() {
+	step "Bluetooth"
+	# A radio that is soft-blocked would look like a driver problem.
+	if command -v rfkill >/dev/null 2>&1; then
+		run_root rfkill unblock bluetooth && ok "bluetooth radio unblocked"
+	else
+		warn "rfkill not found"
+	fi
+}
+
+# ---------------------------------------------------------------- 6e. wallust
+# wallust makes the colours from the wallpaper. Void may package it; otherwise it is built
+# from source with cargo (a few minutes, once). Its config and template come from this repo,
+# in the flavour (v2 or v3 syntax) that matches the installed version.
+cmd_wallust() {
+	step "wallust (colours from the wallpaper)"
+	if ! command -v wallust >/dev/null 2>&1; then
+		if xbps-query -R wallust >/dev/null 2>&1 && run_root xbps-install -y wallust >/dev/null 2>&1; then
+			ok "wallust (Void package)"
+		else
+			install_packages "$RICE_HOME/packages/void-rust.txt" required
+			echo "  building wallust with cargo (several minutes, once)..."
+			if cargo install --locked wallust >"${TMPDIR:-/tmp}/wallust-build.log" 2>&1; then
+				ln -sf "$HOME/.cargo/bin/wallust" "$HOME/.local/bin/wallust"
+				ok "wallust built with cargo"
+			else
+				bad "wallust build failed: see ${TMPDIR:-/tmp}/wallust-build.log"
+				return
+			fi
+		fi
+	else
+		ok "wallust (already installed)"
+	fi
+	major=$(wallust --version 2>/dev/null | sed -n 's/[^0-9]*\([0-9]*\)\..*/\1/p' | head -n1)
+	flavour=v3
+	[ "${major:-3}" -lt 3 ] && flavour=v2
+	mkdir -p "$CONF/wallust/templates"
+	backup_then "$CONF/wallust/wallust.toml"
+	cp "$RICE_HOME/config/wallust/$flavour/wallust.toml" "$CONF/wallust/wallust.toml"
+	cp "$RICE_HOME/config/wallust/$flavour/colors.conf"  "$CONF/wallust/templates/colors.conf"
+	ok "wallust config ($flavour syntax) in ~/.config/wallust"
+}
+
+# ly_set_background <config dir>: point Ly's animation at the wallpaper durdraw file.
+# Ly >= 1.4 has config.lua (animation "dur"); older Ly has config.ini (animation dur_file);
+# a Ly without that animation is left alone.
+ly_set_background() {
+	ini="$1/config.ini"
+	lua="$1/config.lua"
+	if [ -f "$lua" ] && grep -q 'animation *=' "$lua"; then
+		run_root sed -i 's|^\( *\)animation *= *"[a-z_]*"|\1animation = "dur"|' "$lua"
+		if grep -q 'dur_file_path' "$lua"; then
+			run_root sed -i "s|dur_file_path *= *\"[^\"]*\"|dur_file_path = \"$LY_BG\"|" "$lua"
+		else
+			run_root sed -i "/^ *animation *= *\"dur\"/a\\    dur_file_path = \"$LY_BG\"," "$lua"
+		fi
+		ok "Ly: wallpaper background (config.lua)"
+	elif [ -f "$ini" ] && grep -q 'dur_file' "$ini"; then
+		if grep -q '^animation *=' "$ini"; then
+			run_root sed -i "s|^animation *=.*|animation = dur_file|" "$ini"
+		else
+			run_root sh -c "printf 'animation = dur_file\\n' >> '$ini'"
+		fi
+		if grep -q '^#\?dur_file_path' "$ini"; then
+			run_root sed -i "s|^#\\?dur_file_path *=.*|dur_file_path = $LY_BG|" "$ini"
+		else
+			run_root sh -c "printf 'dur_file_path = %s\\n' '$LY_BG' >> '$ini'"
+		fi
+		ok "Ly: wallpaper background (config.ini)"
+	else
+		warn "this Ly version has no dur animation: login background skipped"
+	fi
+}
+
+# ---------------------------------------------------------------- 6f. Ly login manager
+# Ly runs on tty2 (agetty-tty2 must be off). It lists lilith as a Wayland session and, when this
+# Ly has the dur_file animation, shows the current wallpaper as its background.
+cmd_ly() {
+	step "Ly login manager"
+	install_packages "$RICE_HOME/packages/void-ly.txt" required
+	if [ "$DRY" != 1 ] && ! command -v ly >/dev/null 2>&1 && ! [ -d /etc/sv/ly ]; then
+		bad "Ly is not installed (check: lilith-rice packages)"
+		return
+	fi
+	desk=/usr/share/wayland-sessions/lilith.desktop
+	tmp=$(mktemp)
+	printf '[Desktop Entry]\nName=lilith\nComment=lilith Wayland compositor\nExec=%s/.local/bin/lilith-session\nType=Application\n' "$HOME" > "$tmp"
+	if [ -f "$desk" ] && cmp -s "$tmp" "$desk"; then ok "$desk"
+	elif run_root install -Dm644 "$tmp" "$desk"; then ok "$desk installed"
+	else bad "could not install $desk"; fi
+	rm -f "$tmp"
+
+	# background: the current wallpaper as a durdraw file (see bin/lilith-ly-bg)
+	"$RICE_HOME/bin/lilith-ly-bg" >/dev/null 2>&1 && ok "login background made from the wallpaper" \
+		|| warn "login background not made (needs ImageMagick and python3; run: lilith-ly-bg)"
+	ly_set_background "${LY_CFG_DIR:-/etc/ly}"
+	[ -e /var/service/agetty-tty2 ] && run_root rm -f /var/service/agetty-tty2 && ok "agetty-tty2 disabled (Ly uses tty2)"
+	if [ -e /var/service/ly ]; then ok "ly service (already enabled)"
+	elif { [ -d /etc/sv/ly ] || [ "$DRY" = 1 ]; } && run_root ln -s /etc/sv/ly /var/service/ly; then ok "ly service enabled"
+	else bad "could not enable the ly service"; fi
+}
+
+# ---------------------------------------------------------------- 8. source, config, build
+cmd_source() {
+	step "lilith source ($LILITH_SRC)"
+	if ! command -v git >/dev/null 2>&1; then
+		bad "git not installed"
+		return
+	fi
+	if [ -d "$LILITH_SRC/.git" ]; then
+		if git -C "$LILITH_SRC" fetch -q origin \
+		   && { git -C "$LILITH_SRC" reset -q --hard origin/HEAD 2>/dev/null \
+		        || git -C "$LILITH_SRC" reset -q --hard origin/main; }; then
+			ok "updated"
+		else
+			bad "could not update the source"
+		fi
+	else
+		mkdir -p "$(dirname "$LILITH_SRC")"
+		if git clone -q "$LILITH_URL" "$LILITH_SRC"; then
+			ok "cloned $LILITH_URL"
+		else
+			bad "clone failed (network?)"
+		fi
+	fi
+}
+
+# backup_then <path>: move an existing file out of the way
+backup_then() {
+	[ -e "$1" ] || [ -L "$1" ] || return 0
+	mkdir -p "$BACKUP/$(dirname "${1#"$HOME"/}")"
+	mv "$1" "$BACKUP/${1#"$HOME"/}" && warn "backed up $1 -> $BACKUP/"
+}
+
+# link <repo file> <destination>
+link() {
+	if [ -L "$2" ] && [ "$(readlink "$2")" = "$1" ]; then
+		ok "$2"
+		return
+	fi
+	mkdir -p "$(dirname "$2")"
+	backup_then "$2"
+	if ln -s "$1" "$2"; then ok "$2 -> repo"; else bad "could not link $2"; fi
+}
+
+config_dotfiles() {
+	step "Dotfiles"
+	# Exec bits can be lost when files travel (zip, phone, ...).
+	chmod +x "$RICE_HOME/lilith-rice" "$RICE_HOME"/bin/* 2>/dev/null
+	mkdir -p "$HOME/.local/bin" "$CONF/lilith-rice" "$HOME/Pictures/screenshots" "$HOME/Videos/recordings" "$HOME/Notes"
+	link "$RICE_HOME/lilith-rice" "$HOME/.local/bin/lilith-rice"
+	for f in "$RICE_HOME"/bin/*; do
+		link "$f" "$HOME/.local/bin/$(basename "$f")"
+	done
+	link "$RICE_HOME/config/foot/foot.ini"                    "$CONF/foot/foot.ini"
+	for f in yazi.toml keymap.toml init.lua package.toml; do
+		link "$RICE_HOME/config/yazi/$f" "$CONF/yazi/$f"
+	done
+	link "$RICE_HOME/config/fontconfig/fonts.conf"            "$CONF/fontconfig/fonts.conf"
+	link "$RICE_HOME/config/mpv/mpv.conf"                     "$CONF/mpv/mpv.conf"
+	link "$RICE_HOME/config/vis"                              "$CONF/vis"
+	link "$RICE_HOME/config/clangd/config.yaml"               "$CONF/clangd/config.yaml"
+	link "$RICE_HOME/config/udiskie/config.yml"               "$CONF/udiskie/config.yml"
+	link "$RICE_HOME/config/xdg-desktop-portal/lilith-portals.conf" "$CONF/xdg-desktop-portal/lilith-portals.conf"
+	link "$RICE_HOME/config/zsh/zshrc"             "$HOME/.zshrc"
+	link "$RICE_HOME/config/zsh/zprofile"          "$HOME/.zprofile"
+	for f in settings colors; do
+		[ -f "$CONF/lilith-rice/$f.conf" ] || cp "$RICE_HOME/theme/$f.conf" "$CONF/lilith-rice/$f.conf"
+	done
+	reconcile_font
+	ok "settings: $CONF/lilith-rice/settings.conf   colours: colors.conf (made by wallust)"
+	wallpaper_colors
+	printf '%s\n' "$RICE_HOME" > "$CONF/lilith-rice/home"
+	command -v fc-cache >/dev/null 2>&1 && fc-cache -f >/dev/null 2>&1
+}
+
+# Colours from the default wallpaper, once, if wallust and the image are there.
+wallpaper_colors() {
+	command -v wallust >/dev/null 2>&1 || return 0
+	img="$WALLPAPERS/$WALLPAPER_FILE"
+	[ -f "$img" ] || return 0
+	[ -f "$CONF/lilith-rice/.colors-from-wallust" ] && return 0
+	if "$RICE_HOME/bin/lilith-wall" "$img" >/dev/null 2>&1; then
+		touch "$CONF/lilith-rice/.colors-from-wallust"
+		ok "colours made from the wallpaper with wallust"
+	else
+		warn "wallust could not make colours (neutral fallback in use): run lilith-wall $img"
+	fi
+}
+
+config_system() {
+	step "System files (/etc)"
+	for f in $(cd "$RICE_HOME/system" && find . -type f | sed 's|^\./||'); do
+		if [ -f "/$f" ] && cmp -s "$RICE_HOME/system/$f" "/$f"; then
+			ok "/$f"
+		elif run_root install -Dm644 "$RICE_HOME/system/$f" "/$f"; then
+			ok "/$f installed"
+		else
+			bad "could not install /$f"
+		fi
+	done
+}
+
+# TLP: the settings live in /etc/tlp.conf itself (the file you edit by hand). Each KEY is replaced
+# where it already exists (also when commented out), or appended. The original is kept once as
+# /etc/tlp.conf.lilith-backup. Applies after a reboot or `sudo tlp start`.
+# set_tlp <KEY> <value>
+set_tlp() {
+	if grep -q "^$1=" /etc/tlp.conf 2>/dev/null; then
+		run_root sed -i "s|^$1=.*|$1=$2|" /etc/tlp.conf
+	elif grep -q "^#$1=" /etc/tlp.conf 2>/dev/null; then
+		run_root sed -i "0,/^#$1=.*/s||$1=$2|" /etc/tlp.conf
+	else
+		run_root sh -c "printf '%s=%s\\n' '$1' '$2' >> /etc/tlp.conf"
+	fi
+}
+
+config_tlp() {
+	step "TLP (/etc/tlp.conf)"
+	if [ "$DRY" != 1 ] && [ ! -f /etc/tlp.conf ]; then
+		warn "/etc/tlp.conf not found (is tlp installed? lilith-rice deps)"
+		return
+	fi
+	[ -f /etc/tlp.conf.lilith-backup ] || run_root cp -a /etc/tlp.conf /etc/tlp.conf.lilith-backup
+	run_root rm -f /etc/tlp.d/10-x1c7.conf          # the old drop-in of earlier versions
+	set_tlp CPU_SCALING_GOVERNOR_ON_AC powersave
+	set_tlp CPU_SCALING_GOVERNOR_ON_BAT powersave
+	set_tlp CPU_ENERGY_PERF_POLICY_ON_AC balance_performance
+	set_tlp CPU_ENERGY_PERF_POLICY_ON_BAT balance_power
+	set_tlp CPU_BOOST_ON_AC 1
+	set_tlp CPU_BOOST_ON_BAT 0
+	set_tlp USB_AUTOSUSPEND 0                       # a mouse dongle must never be put to sleep
+	set_tlp START_CHARGE_THRESH_BAT0 75             # battery care: charge between 75% and 80%
+	set_tlp STOP_CHARGE_THRESH_BAT0 80
+	ok "/etc/tlp.conf (governor, boost, USB autosuspend off, battery thresholds 75/80)"
+}
+
+# doas next to sudo, with a single rule for members of wheel.
+config_doas() {
+	step "doas"
+	rule="permit persist :wheel"
+	tmp=$(mktemp)
+	printf '%s\n' "$rule" > "$tmp"
+	if [ -f /etc/doas.conf ] && cmp -s "$tmp" /etc/doas.conf; then
+		ok "/etc/doas.conf"
+	elif command -v doas >/dev/null 2>&1 && ! doas -C "$tmp" >/dev/null 2>&1; then
+		warn "doas rejected the rule; /etc/doas.conf left alone"
+	else
+		[ -f /etc/doas.conf ] && run_root cp -a /etc/doas.conf /etc/doas.conf.lilith-backup
+		if run_root install -m 0400 -o root -g root "$tmp" /etc/doas.conf; then ok "/etc/doas.conf: $rule"
+		else bad "could not write /etc/doas.conf"; fi
+	fi
+	rm -f "$tmp"
+}
+
+# set_rc <file> <KEY> <value>: set KEY=value in a root-owned config file (replace or append).
+set_rc() {
+	if grep -q "^#\?$2=" "$1" 2>/dev/null; then
+		run_root sed -i "s|^#\?$2=.*|$2=$3|" "$1"
+	else
+		run_root sh -c "printf '%s=%s\\n' '$2' '$3' >> '$1'"
+	fi
+}
+
+# Timezone and the UK console keymap. (Void musl has no locale support, so there is no locale step.)
+config_locale() {
+	step "Timezone and keymap"
+	if [ "$(readlink /etc/localtime 2>/dev/null)" = "/usr/share/zoneinfo/$TIMEZONE" ]; then
+		ok "timezone $TIMEZONE"
+	elif [ -e "/usr/share/zoneinfo/$TIMEZONE" ] && run_root ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime; then
+		ok "timezone set to $TIMEZONE"
+	else
+		bad "could not set the timezone (is tzdata installed?)"
+	fi
+	set_rc /etc/rc.conf TIMEZONE "$TIMEZONE" && set_rc /etc/rc.conf KEYMAP "\"$KEYMAP\"" && ok "console keymap $KEYMAP (rc.conf)"
+}
+
+# The power menu runs zzz / reboot / poweroff through sudo without a password prompt,
+# only for members of wheel and only for those three commands. The rule is validated first.
+config_power() {
+	step "Power menu permissions"
+	if ! command -v visudo >/dev/null 2>&1; then
+		warn "visudo not found; the power menu will fall back to loginctl"
+		return
+	fi
+	cmds=""
+	for c in zzz reboot poweroff; do
+		path=$(command -v "$c" 2>/dev/null) || continue
+		real=$(readlink -f "$path")
+		cmds="$cmds${cmds:+, }$path"
+		[ "$real" != "$path" ] && cmds="$cmds, $real"
+	done
+	[ -n "$cmds" ] || { warn "zzz/reboot/poweroff not found"; return; }
+	tmp=$(mktemp)
+	printf '# lilith-rice: the power menu may suspend, reboot and power off without a password\n%%wheel ALL=(root) NOPASSWD: %s\n' "$cmds" > "$tmp"
+	if run_root visudo -cf "$tmp" >/dev/null 2>&1; then
+		if [ -f /etc/sudoers.d/10-lilith-power ] && cmp -s "$tmp" /etc/sudoers.d/10-lilith-power; then
+			ok "/etc/sudoers.d/10-lilith-power"
+		elif run_root install -m 0440 -o root -g root "$tmp" /etc/sudoers.d/10-lilith-power; then
+			ok "/etc/sudoers.d/10-lilith-power installed"
+		else
+			bad "could not install the sudoers rule"
+		fi
+	else
+		warn "the generated sudoers rule did not validate; skipped"
+	fi
+	rm -f "$tmp"
+}
+
+# PipeWire as the Void handbook describes: pipewire launches wireplumber and
+# pipewire-pulse itself (right order), and ALSA apps are routed through it.
+config_audio() {
+	step "Audio (PipeWire)"
+	pw=/etc/pipewire/pipewire.conf.d
+	alsa=/etc/alsa/conf.d
+	run_root mkdir -p "$pw" "$alsa"
+	for pair in \
+	  "/usr/share/examples/wireplumber/10-wireplumber.conf $pw/10-wireplumber.conf" \
+	  "/usr/share/examples/pipewire/20-pipewire-pulse.conf $pw/20-pipewire-pulse.conf" \
+	  "/usr/share/alsa/alsa.conf.d/50-pipewire.conf $alsa/50-pipewire.conf" \
+	  "/usr/share/alsa/alsa.conf.d/99-pipewire-default.conf $alsa/99-pipewire-default.conf"
+	do
+		set -- $pair
+		if [ -L "$2" ] || [ -e "$2" ]; then
+			ok "$2"
+		elif [ "$DRY" != 1 ] && [ ! -e "$1" ]; then
+			warn "$1 missing (are pipewire and alsa-pipewire installed?)"
+		elif run_root ln -s "$1" "$2"; then
+			ok "$2 linked"
+		else
+			bad "could not link $2"
+		fi
+	done
+}
+
+config_shell() {
+	step "Login shell"
+	zsh_path=$(command -v zsh || true)
+	if [ -z "$zsh_path" ]; then
+		warn "zsh not installed yet"
+	elif [ "$(login_shell)" = "$zsh_path" ]; then
+		ok "zsh is your login shell"
+	elif run_root usermod -s "$zsh_path" "$USER"; then
+		ok "login shell set to $zsh_path"
+	else
+		bad "could not change login shell"
+	fi
+}
+
+config_lilith() {
+	step "lilith configuration"
+	if [ ! -d "$LILITH_SRC" ]; then
+		bad "lilith source missing: run 'lilith-rice source'"
+	else
+		mkdir -p "$LILITH_SRC/config"
+		if cp -f "$RICE_HOME/lilith/config.h" "$LILITH_SRC/config.h" \
+		   && cp -f "$RICE_HOME"/lilith/config/*.h "$LILITH_SRC/config/"; then
+			ok "config copied into $LILITH_SRC"
+		else
+			bad "could not copy lilith config"
+		fi
+	fi
+	# Always generate the palette outputs: foot.ini includes colors.ini, which must exist.
+	"$RICE_HOME/bin/lilith-theme" --no-build || bad "theme generation failed"
+}
+
+cmd_config() {
+	config_dotfiles
+	config_system
+	config_tlp
+	config_doas
+	config_locale
+	config_power
+	config_audio
+	config_shell
+	config_lilith
+}
+
+cmd_build() {
+	step "Build lilith"
+	if [ ! -d "$LILITH_SRC" ]; then
+		bad "source missing: run 'lilith-rice source'"
+		return
+	fi
+	if ! pkg-config --exists wlroots-0.19 2>/dev/null; then
+		bad "wlroots-0.19 development files not found (package: wlroots0.19-devel)"
+		return
+	fi
+	"$RICE_HOME/bin/lilith-theme" --no-build >/dev/null 2>&1
+	# Always start from the stock sources, then try our patch (bar modules, per-device scrolling).
+	patchfile="$RICE_HOME/lilith/patches/0001-lilith-rice.patch"
+	git -C "$LILITH_SRC" checkout -q -- src 2>/dev/null
+	patched=0
+	if patch -d "$LILITH_SRC" -p1 -F0 --dry-run -s < "$patchfile" >/dev/null 2>&1 \
+	   && patch -d "$LILITH_SRC" -p1 -F0 -s < "$patchfile"; then
+		patched=1
+	else
+		warn "patch does not apply to this lilith version: building stock lilith (logo, title and REC stay empty)"
+	fi
+	if make -C "$LILITH_SRC" >"$LILITH_SRC/build.log" 2>&1; then
+		[ "$patched" = 1 ] && ok "patch applied (bar logo, window title, REC badge, per-device scrolling)"
+		install -Dm755 "$LILITH_SRC/lilith" "$HOME/.local/bin/lilith"
+		ok "lilith installed to ~/.local/bin/lilith"
+	elif [ "$patched" = 1 ]; then
+		warn "patched build failed; building stock lilith instead (see $LILITH_SRC/build.log)"
+		cp "$LILITH_SRC/build.log" "$LILITH_SRC/build-patched.log"
+		git -C "$LILITH_SRC" checkout -q -- src
+		if make -C "$LILITH_SRC" >"$LILITH_SRC/build.log" 2>&1; then
+			install -Dm755 "$LILITH_SRC/lilith" "$HOME/.local/bin/lilith"
+			ok "stock lilith installed (the patch failed to compile: build-patched.log)"
+		else
+			bad "build failed; last lines of $LILITH_SRC/build.log:"
+			tail -n 15 "$LILITH_SRC/build.log" | sed 's/^/        /'
+		fi
+	else
+		bad "build failed; last lines of $LILITH_SRC/build.log:"
+		tail -n 15 "$LILITH_SRC/build.log" | sed 's/^/        /'
+	fi
+}
+
+# ---------------------------------------------------------------- 9. verify
+cmd_verify() {
+	step "Verify"
+	for c in lilith lilith-session lilith-menu lilith-status lilith-theme lilith-shot lilith-record \
+	         foot zsh yazi fzf wmenu wpctl brightnessctl grim slurp wf-recorder wl-copy cliphist \
+	         nmtui nmcli bluetoothctl dbus-run-session pipewire curl; do
+		expect bad "$c" "command not found" command -v "$c"
+	done
+	for s in $(list_items "$RICE_HOME/packages/services.txt"); do
+		if [ ! -e "/var/service/$s" ]; then
+			bad "service $s: not enabled"
+		elif sv status "/var/service/$s" 2>/dev/null | grep -q '^run:'; then
+			ok "service $s: running"
+		else
+			warn "service $s: enabled, not running yet"
+		fi
+	done
+	expect warn "NetworkManager enabled" "run 'lilith-rice network' as the last step" \
+		test -e /var/service/NetworkManager
+	for g in video network bluetooth; do
+		expect warn "you are in group $g" "this script never changes groups; add yourself if you want it" in_group "$g"
+	done
+	if [ -e /var/service/acpid ]; then
+		warn "acpid is enabled but elogind handles lid/power (turn it off: sudo rm /var/service/acpid)"
+	fi
+	expect bad "elogind lid/power config" "run 'lilith-rice config'" \
+		test -f /etc/elogind/logind.conf.d/10-lilith.conf
+	expect bad "PipeWire launches wireplumber" "run 'lilith-rice config'" \
+		test -L /etc/pipewire/pipewire.conf.d/10-wireplumber.conf
+	expect bad "PipeWire launches pipewire-pulse" "run 'lilith-rice config'" \
+		test -L /etc/pipewire/pipewire.conf.d/20-pipewire-pulse.conf
+	expect bad "ALSA routed through PipeWire" "run 'lilith-rice config'" \
+		test -L /etc/alsa/conf.d/50-pipewire.conf
+	expect warn "lilith-select (crosshair)" "run 'lilith-rice select'; Print falls back to slurp" command -v lilith-select
+	for c in yazi vis btop pfetch librewolf firefox flatpak mpv drift pipemixer ani-cli moviebox-tui rimg zoxide atuin udiskie ouch \
+	         genact ascii-splash clangd clang-format clang-tidy rust-analyzer rustfmt cargo-clippy lua-language-server stylua \
+	         bash-language-server shellcheck shfmt basedpyright-langserver black ruff; do
+		expect warn "$c" "run lilith-rice ... (see lilith-rice help)" command -v "$c"
+	done
+	for fam in "Gallant" "JetBrains Mono" "Symbols Nerd Font" "Noto Color Emoji"; do
+		expect warn "font $fam" "run 'lilith-rice fonts'" fc_has "$fam"
+	done
+	expect warn "cursor theme in settings.conf" "run 'lilith-rice cursors'" test -d "$HOME/.local/share/icons/$(sed -n 's/^cursor="\(.*\)"$/\1/p' "$CONF/lilith-rice/settings.conf" 2>/dev/null | head -n1)"
+	expect warn "icon theme in settings.conf" "run 'lilith-rice icons'" icon_installed "$(sed -n 's/^icons="\(.*\)"$/\1/p' "$CONF/lilith-rice/settings.conf" 2>/dev/null | head -n1)"
+	expect warn "Vis plugins cloned (vis-plug)" "start vis once, wait, restart it" test -d "$HOME/.cache/vis-plug/plugins"
+	expect warn "thinkpad_acpi kernel module" "run 'lilith-rice config' (loads it at boot)" sh -c 'grep -q "^thinkpad_acpi " /proc/modules || [ -d /sys/devices/platform/thinkpad_acpi ]'
+	expect warn "TLP charge thresholds in /etc/tlp.conf" "run 'lilith-rice config'" grep -q '^START_CHARGE_THRESH_BAT0=' /etc/tlp.conf
+	expect warn "zsh plugins" "run 'lilith-rice shell'" test -d "$ZSH_PLUGINS/fast-syntax-highlighting"
+	expect warn "flathub remote" "run 'lilith-rice flatpak'" sh -c 'flatpak --user remotes 2>/dev/null | grep -q flathub'
+	expect warn "power menu rule" "run 'lilith-rice config'" test -f /etc/sudoers.d/10-lilith-power
+	expect warn "wallpaper $WALLPAPER_FILE" "run 'lilith-rice wallpapers'" has_wallpapers
+	expect bad "settings.conf" "run 'lilith-rice config'" test -f "$CONF/lilith-rice/settings.conf"
+	expect bad "colors.conf" "run 'lilith-rice config'" test -f "$CONF/lilith-rice/colors.conf"
+	expect warn "wallust" "run 'lilith-rice wallust'" command -v wallust
+	expect warn "colours made by wallust" "run: lilith-wall <image>" test -f "$CONF/lilith-rice/.colors-from-wallust"
+	cfg_scale=$( . "$CONF/lilith-rice/settings.conf" 2>/dev/null; echo "${scale:-1}" )
+	built_scale=$(sed -n 's/^#define T_SCALE  *\([0-9.]*\)f.*/\1/p' "$LILITH_SRC/theme.h" 2>/dev/null)
+	expect warn "scale $cfg_scale is what lilith was built with" "run: lilith-theme, then restart the session (built: ${built_scale:-none})" test "${built_scale%.0}" = "${cfg_scale%.0}"
+	expect warn "installed lilith is newer than the last theme change" "settings changed but not rebuilt: run lilith-theme, then restart the session" test "$HOME/.local/bin/lilith" -nt "$LILITH_SRC/theme.h"
+	expect warn "bar logo/title patch built in" "see build.log; the stock bar is in use" grep -q bar_title_update "$LILITH_SRC/src/bar.h"
+	expect warn "doas rule" "run 'lilith-rice config'" test -f /etc/doas.conf
+	expect warn "ly login manager" "run 'lilith-rice ly'" test -e /var/service/ly
+	expect warn "timezone $TIMEZONE" "run 'lilith-rice config'" test "$(readlink /etc/localtime)" = "/usr/share/zoneinfo/$TIMEZONE"
+	expect bad "foot colours" "run 'lilith-theme'" test -f "$CONF/foot/colors.ini"
+	expect bad "monospace font" "fontconfig has no monospace font" fc-match monospace
+	expect warn "login shell is zsh" "run 'lilith-rice config'" \
+		test "$(login_shell)" = "$(command -v zsh || echo none)"
+	if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+		ok "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
+	else
+		warn "XDG_RUNTIME_DIR unset (normal outside a tty login; check again on tty1)"
+	fi
+	printf '\n'
+	if [ "$PROBLEMS" -eq 0 ]; then
+		printf "${G}${B}all checks passed${Z}\n"
+	else
+		printf "${R}${B}%s problem(s) found${Z}\n" "$PROBLEMS"
+	fi
+	[ "$PROBLEMS" -eq 0 ]
+}
+
+# ---------------------------------------------------------------- 10. install / update
+cmd_install() {
+	cmd_deps
+	cmd_services
+	cmd_bluetooth
+	soft cmd_fonts "some fonts failed; retry later with: lilith-rice fonts"
+	soft cmd_wallpapers "the wallpaper failed; retry later with: lilith-rice wallpapers"
+	soft cmd_wallust "wallust is not set up; retry later with: lilith-rice wallust"
+	cmd_source
+	cmd_config
+	cmd_build
+	soft cmd_ly "Ly was not set up; retry later with: lilith-rice ly"
+	soft cmd_select   "the crosshair selector was not built (Print uses slurp); retry later with: lilith-rice select"
+	soft cmd_files    "files tools were not all set up; retry later with: lilith-rice files"
+	soft cmd_shell    "shell plugins were not all set up; retry later with: lilith-rice shell"
+	soft cmd_browsers "browsers were not all installed; retry later with: lilith-rice browsers"
+	soft cmd_flatpak  "Flatpak/Bazaar failed; retry later with: lilith-rice flatpak"
+	soft cmd_media    "media apps were not all installed; retry later with: lilith-rice media"
+	soft cmd_toys     "some terminal toys failed; retry later with: lilith-rice toys"
+	soft cmd_dev      "some development tools failed; retry later with: lilith-rice dev"
+	soft cmd_cursors  "cursors failed; retry later with: lilith-rice cursors"
+	soft cmd_icons    "icon themes failed; retry later with: lilith-rice icons"
+	cmd_verify
+	rc=$?
+	cat <<MSG
+
+${B}Next:${Z}
+  1. lilith-rice network   (switches Wi-Fi to NetworkManager; then use nmtui)
+  2. Reboot (so the services, elogind and Ly start).
+  3. Log in at the Ly screen and pick \"lilith\" (tty1 also still starts the desktop by itself).
+  4. Super+/ shows every key binding.
+MSG
+	return $rc
+}
+
+cmd_update() {
+	step "Update"
+	git -C "$RICE_HOME" pull --ff-only || die "git pull failed (local changes?)"
+	cmd_source
+	cmd_config
+	cmd_build
+	cmd_verify
+}
+
+# ---------------------------------------------------------------- 11. dispatch
+case "${1:-help}" in
+	install)    cmd_install ;;
+	deps)       cmd_deps ;;
+	packages)   cmd_packages ;;
+	services)   cmd_services ;;
+	bluetooth)  cmd_bluetooth ;;
+	fonts)      cmd_fonts ;;
+	source)     cmd_source ;;
+	config)     cmd_config ;;
+	build)      cmd_build ;;
+	wallpapers) cmd_wallpapers ;;
+	wallust)    cmd_wallust ;;
+	ly)         cmd_ly ;;
+	files)      cmd_files ;;
+	shell)      cmd_shell ;;
+	browsers)   cmd_browsers ;;
+	flatpak)    cmd_flatpak ;;
+	media)      cmd_media ;;
+	toys)       cmd_toys ;;
+	dev)        cmd_dev ;;
+	cursors)    cmd_cursors ;;
+	icons)      cmd_icons ;;
+	select)     cmd_select ;;
+	network)    cmd_network ;;
+	theme)      exec "$RICE_HOME/bin/lilith-theme" ;;
+	verify)     cmd_verify ;;
+	update)     cmd_update ;;
+	help|-h|--help) usage ;;
+	*) usage >&2; exit 2 ;;
+esac

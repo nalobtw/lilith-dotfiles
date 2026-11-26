@@ -1,0 +1,15 @@
+# ======================================================================
+#  config.yaml — clangd (C / C++ language server used by Vis)
+# ----------------------------------------------------------------------
+#  Lives at ~/.config/clangd/config.yaml (symlink to this file).
+#  clangd finds compile_commands.json by itself in the project or its build/ folder. Make one with
+#      bear -- make        (or: cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -B build)
+#  Headers work through the same file. clang-tidy checks run inside clangd, per project; add a
+#  .clang-tidy file to a project to change which ones.
+# ======================================================================
+
+Index:
+  Background: Build
+Diagnostics:
+  ClangTidy:
+    Add: [bugprone-*, performance-*, clang-analyzer-*]

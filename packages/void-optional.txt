@@ -1,0 +1,8 @@
+# ======================================================================
+#  void-optional.txt — nice-to-have packages
+# ----------------------------------------------------------------------
+#  One per line. A failure here only prints a warning.
+# ======================================================================
+
+xdg-utils
+btop        # system monitor (CPU, memory, disks, network, processes)

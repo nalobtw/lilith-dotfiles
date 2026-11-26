@@ -1,0 +1,14 @@
+# ======================================================================
+#  zprofile — login shell: PATH, editor, and the desktop on tty1 (fallback to Ly)
+# ----------------------------------------------------------------------
+#  Lives at ~/.zprofile (symlink to this file).
+# ======================================================================
+
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+export EDITOR=vis
+export VISUAL=vis
+
+# tty1 starts the desktop by itself, so it still works if Ly is not running.
+if [ -z "${WAYLAND_DISPLAY:-}" ] && [ "${XDG_VTNR:-}" = "1" ]; then
+	exec lilith-session
+fi

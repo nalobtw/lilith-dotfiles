@@ -1,0 +1,102 @@
+lilith-rice: bar logo, window title and REC modules; natural scrolling per device type
+
+Bar (src/bar.h, src/lilith.c):
+  BarModLogo   static text (barlogo, config/config_bar.h)
+  BarModTitle  title of the focused window, or bartitlefallback ("desktop"); kept current
+               from printstatus() (focus, title and tag changes)
+  BarModRec    red "REC" badge, shown while the status line on stdin starts with "REC|"
+               (lilith-status prints that prefix while lilith-record is recording)
+Input (src/lilith.c):
+  natural scrolling is chosen per device: touchpads use natural_scrolling_touchpad, mice use
+  natural_scrolling_mouse (upstream applies one value to every pointer).
+
+Applied by `lilith-rice build` with `patch -p1 -F0`, all or nothing. If it does not apply or
+compile, the installer builds stock lilith: the three bar modules stay empty and natural
+scrolling follows the stock natural_scrolling value.
+
+--- a/src/bar.h
++++ b/src/bar.h
+@@ -1643,6 +1643,35 @@
+ 		bar_draw_all();
+ }
+ 
++/* lilith-rice: text of the BarModTitle module (focused window title, or a fallback). */
++static void
++bar_title_update(void)
++{
++	Client *c;
++	const char *t;
++	char buf[BAR_TXT];
++	size_t n;
++
++	if (!bar_modused[BarModTitle])
++		return;
++	c = selmon ? focustop(selmon) : NULL;
++	t = c ? client_get_title(c) : NULL;
++	if (!t || !*t)
++		t = bartitlefallback;
++	n = strlen(t);
++	if (n > (size_t)bartitlemax) {
++		n = bartitlemax;
++		while (n > 0 && ((unsigned char)t[n] & 0xC0) == 0x80)  /* do not cut a UTF-8 character */
++			n--;
++	}
++	if (n > sizeof(buf) - 1)
++		n = sizeof(buf) - 1;
++	memcpy(buf, t, n);
++	buf[n] = '\0';
++	if (bar_setmod(BarModTitle, SchemeTitle, buf))
++		bar_draw_all();
++}
++
+ static int
+ bar_sys_update(void)
+ {
+@@ -1796,6 +1825,13 @@
+ 		start = nl + 1;
+ 	}
+ 	if (last) {
++		/* lilith-rice: a status line that starts with "REC|" switches the REC module on */
++		if (!strncmp(last, "REC|", 4)) {
++			bar_setmod(BarModRec, SchemeRec, barrectext);
++			last += 4;
++		} else {
++			bar_setmod(BarModRec, SchemeRec, "");
++		}
+ 		snprintf(bar_status, sizeof(bar_status), "%s", last);
+ 		bar_status_stdin = 1;
+ 		bar_draw_all();
+@@ -1871,6 +1907,9 @@
+ 	if (bar_modused[BarModTemp])
+ 		bar_temp_find();
+ 	bar_sys_update();
++	if (bar_modused[BarModLogo])
++		bar_setmod(BarModLogo, SchemeLogo, barlogo);
++	bar_title_update();
+ 	if (bar_modused[BarModVolume])
+ 		bar_vol_start();
+ 	if (bar_modused[BarModCpu] || bar_modused[BarModRam] || bar_modused[BarModTemp]
+--- a/src/lilith.c
++++ b/src/lilith.c
+@@ -1569,8 +1569,10 @@
+ 			libinput_device_config_tap_set_button_map(device, button_map);
+ 		}
+ 
+-		if (libinput_device_config_scroll_has_natural_scroll(device))
+-			libinput_device_config_scroll_set_natural_scroll_enabled(device, natural_scrolling);
++		if (libinput_device_config_scroll_has_natural_scroll(device))  /* lilith-rice: per device type */
++			libinput_device_config_scroll_set_natural_scroll_enabled(device,
++					libinput_device_config_tap_get_finger_count(device)
++					? natural_scrolling_touchpad : natural_scrolling_mouse);
+ 
+ 		if (libinput_device_config_dwt_is_available(device))
+ 			libinput_device_config_dwt_set_enabled(device, disable_while_typing);
+@@ -3236,6 +3238,8 @@
+ 	Client *c;
+ 	uint32_t occ, urg, sel;
+ 
++	bar_title_update();  /* lilith-rice: keep the bar's window title current */
++
+ 	wl_list_for_each(m, &mons, link) {
+ 		occ = urg = 0;
+ 		wl_list_for_each(c, &clients, link) {

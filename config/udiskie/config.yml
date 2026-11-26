@@ -1,0 +1,12 @@
+# ======================================================================
+#  config.yml — udiskie: mount USB and other drives automatically, quietly
+# ----------------------------------------------------------------------
+#  Lives at ~/.config/udiskie/config.yml (symlink to this file). Started by lilith-autostart.
+#  Drives appear under /run/media/<you>/. Unmount and eject with `M` in yazi.
+# ======================================================================
+
+program_options:
+  automount: true
+  notify: false
+  tray: false
+  file_manager: "foot -e yazi"

@@ -1,0 +1,31 @@
+#!/bin/sh
+# ======================================================================
+#  lilith-autostart — session daemons, started once the Wayland socket exists
+# ----------------------------------------------------------------------
+#  Everything runs detached. To add a daemon, add one `start <cmd> [args]` line below.
+# ======================================================================
+
+set -u
+
+# start <cmd...> — run detached; silently skip commands that are not installed.
+start() {
+	command -v "$1" >/dev/null 2>&1 || return 0
+	"$@" </dev/null >/dev/null 2>&1 &
+}
+
+# --- audio ---------------------------------------------------------------
+# pipewire starts wireplumber and pipewire-pulse itself (see /etc/pipewire/pipewire.conf.d),
+# so they always come up in the right order.
+start pipewire
+start lilith-level restore   # volume and brightness come back as you left them
+
+# --- drives and permissions ------------------------------------------------
+# polkit agent: lets desktop programs ask for authorisation (drive actions, Flatpak, ...)
+for agent in /usr/libexec/polkit-gnome-authentication-agent-1 /usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1; do
+	[ -x "$agent" ] && { start "$agent"; break; }
+done
+start udiskie        # mounts USB and other drives you plug in (config: ~/.config/udiskie)
+
+# --- clipboard history (text + images) -----------------------------------
+start wl-paste --type text  --watch cliphist store
+start wl-paste --type image --watch cliphist store
