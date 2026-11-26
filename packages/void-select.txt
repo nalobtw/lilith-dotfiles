@@ -1,8 +1,0 @@
-# ======================================================================
-#  void-select.txt — build dependencies of the crosshair selector (tools/lilith-select)
-# ----------------------------------------------------------------------
-#  Installed by `lilith-rice select`. gcc, make, pkg-config and the wayland packages come from `deps`.
-#  Check the names with: lilith-rice packages
-# ======================================================================
-
-cairo-devel

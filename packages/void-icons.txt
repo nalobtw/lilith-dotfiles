@@ -1,8 +1,0 @@
-# ======================================================================
-#  void-icons.txt — icon themes from Void's own repository
-# ----------------------------------------------------------------------
-#  Installed by `lilith-rice icons`. Pixora (the main icon theme) is cloned from its git repository.
-#  Names are for Void x86_64-musl; check them with: lilith-rice packages
-# ======================================================================
-
-papirus-icon-theme
